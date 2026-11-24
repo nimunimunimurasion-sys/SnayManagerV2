@@ -1,0 +1,46 @@
+name: Publish SnayManager update
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'updates/SnayManagerV2-update.zip'
+      - 'updates/SnayManagerV2-update.json'
+      - '.github/workflows/publish-update.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify update package
+        shell: bash
+        run: |
+          python3 - <<'PYCODE'
+          import hashlib, json, pathlib, zipfile
+          base = pathlib.Path('updates')
+          meta = json.loads((base / 'SnayManagerV2-update.json').read_text())
+          assert meta['zip_asset'] == 'SnayManagerV2-update.zip'
+          path = base / meta['zip_asset']
+          assert hashlib.sha256(path.read_bytes()).hexdigest() == meta['sha256']
+          assert zipfile.is_zipfile(path)
+          with zipfile.ZipFile(path) as z:
+              assert 'SnayManagerV2/install-version.json' in z.namelist()
+              installed = json.loads(z.read('SnayManagerV2/install-version.json'))
+              assert installed['version'] == meta['version']
+          print('Verified version:', meta['version'])
+          PYCODE
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version=$(python3 -c "import json;print(json.load(open('updates/SnayManagerV2-update.json'))['version'])")
+          tag="v$version"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" updates/SnayManagerV2-update.zip updates/SnayManagerV2-update.json --clobber
+            gh release edit "$tag" --latest
+          else
+            gh release create "$tag" updates/SnayManagerV2-update.zip updates/SnayManagerV2-update.json --title "SnayManager V2 $tag" --notes "SnayManager update package with SHA-256 verification." --latest
+          fi
