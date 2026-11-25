@@ -1,0 +1,93 @@
+name: Publish guest nickname fix 2.2.4
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/fix-guest-nickname-224.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download verified previous release
+        env:
+          GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p baseline
+          gh release download v2.2.3 --pattern 'SnayManagerV2-update.zip' --dir baseline
+      - name: Patch, build and verify
+        run: |
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          from zipfile import ZipFile, ZIP_DEFLATED
+          import json, hashlib, shutil, py_compile
+          p = Path('bundle')
+          with ZipFile('baseline/SnayManagerV2-update.zip') as z:
+              z.extractall(p)
+          app = p / 'SnayManagerV2'
+          site = app / 'snaymanager/site.py'
+          s = site.read_text(encoding='utf-8')
+          old = '        if await nick.count() == 1 and await nick.is_visible():\n            await nick.fill(f"{self.config.nickname_prefix}-{index:02d}")\n'
+          new = '''        if await nick.count() == 1 and await nick.is_visible():
+              if self.config.connection_mode == "guest_probe":
+                  # Guest sessions may not set a custom nickname in Snay.io.
+                  await nick.fill("")
+              else:
+                  await nick.fill(f"{self.config.nickname_prefix}-{index:02d}")
+          '''
+          assert s.count(old) == 1, 'Unexpected Site.play nickname code'
+          site.write_text(s.replace(old, new), encoding='utf-8')
+          domain = app / 'snaymanager/domain.py'
+          s = domain.read_text(encoding='utf-8')
+          marker = '    if "YOUR ACCOUNT JUST CONNECTED FROM ANOTHER TAB OR DEVICE" in upper:\n'
+          assert s.count(marker) == 1
+          s = s.replace(marker, '    if "YOU MUST HAVE AN ACCOUNT TO USE A NICKNAME" in upper:\n        return "NICKNAME_REQUIRES_ACCOUNT"\n' + marker)
+          domain.write_text(s, encoding='utf-8')
+          snapshot = app / 'snaymanager/assets/snapshot.js'
+          s = snapshot.read_text(encoding='utf-8')
+          marker = '  // Do not return tokens, cookies, storage contents, emails, or profile names.\n'
+          assert s.count(marker) == 1
+          s = s.replace(marker, '''  // Capture only Snay's public guest nickname warning, not any user data.
+          for (const element of document.querySelectorAll('[role="alert"],.toast,.toast-message,.notification,.snackbar,.notyf__toast,.iziToast')) {
+            if (visible(element) && /you must have an account to use a nickname/i.test(text(element))) {
+              errors.push('YOU MUST HAVE AN ACCOUNT TO USE A NICKNAME');
+              break;
+            }
+          }
+          ''' + marker)
+          snapshot.write_text(s, encoding='utf-8')
+          (app/'install-version.json').write_text('{"version": "2.2.4", "launcher": "1.0.0"}\n', encoding='utf-8')
+          (app/'update-manifest.json').write_text(json.dumps({
+            "package": "SnayManagerV2", "version": "2.2.4",
+            "channel": "github-releases",
+            "description": "Do not set a nickname for anonymous guest PLAY"
+          }) + "\n", encoding='utf-8')
+          py_compile.compile(str(site), doraise=True)
+          py_compile.compile(str(domain), doraise=True)
+          assert 'await nick.fill("")' in site.read_text(encoding='utf-8')
+          assert 'NICKNAME_REQUIRES_ACCOUNT' in domain.read_text(encoding='utf-8')
+          out = Path('SnayManagerV2-update.zip')
+          with ZipFile(out, 'w', ZIP_DEFLATED) as z:
+              for f in sorted(app.rglob('*')):
+                  if f.is_file() and '__pycache__' not in f.parts:
+                      z.write(f, f.relative_to(p))
+          meta = {
+            "version": "2.2.4",
+            "zip_asset": "SnayManagerV2-update.zip",
+            "sha256": hashlib.sha256(out.read_bytes()).hexdigest(),
+            "min_launcher": "1.0.0"
+          }
+          Path('SnayManagerV2-update.json').write_text(json.dumps(meta, indent=2) + '\n', encoding='utf-8')
+          with ZipFile(out) as z:
+              assert json.loads(z.read('SnayManagerV2/install-version.json'))['version'] == meta['version']
+          assert hashlib.sha256(out.read_bytes()).hexdigest() == meta['sha256']
+          print('Verified release', meta['version'], 'sha256', meta['sha256'])
+          PYCODE
+      - name: Publish v2.2.4
+        env:
+          GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create v2.2.4 SnayManagerV2-update.zip SnayManagerV2-update.json --title 'SnayManager V2 v2.2.4' --notes 'Fix guest PLAY: leave the account-only nickname field blank; preserve account mode.' --latest
