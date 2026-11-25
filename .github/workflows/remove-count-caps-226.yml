@@ -1,0 +1,115 @@
+name: Remove arbitrary player count caps v2.2.6
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/remove-count-caps-226.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download baseline update
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p baseline
+          gh release download v2.2.5 --pattern 'SnayManagerV2-update.zip' --dir baseline
+      - name: Remove count caps and verify
+        run: |
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          from zipfile import ZipFile, ZIP_DEFLATED
+          import sys, json, hashlib, py_compile, tempfile, shutil
+
+          with tempfile.TemporaryDirectory() as d:
+              root = Path(d)
+              with ZipFile('baseline/SnayManagerV2-update.zip') as z:
+                  z.extractall(root)
+              app = root / 'SnayManagerV2'
+              domain = app / 'snaymanager/domain.py'
+              text = domain.read_text(encoding='utf-8')
+              old = 'if isinstance(self.count, bool) or not isinstance(self.count, int) or not 1 <= self.count <= 20:'
+              assert text.count(old) == 1
+              text = text.replace(old, 'if isinstance(self.count, bool) or not isinstance(self.count, int) or self.count < 1:')
+              old = 'raise ValueError("生成数は1〜20で指定してください")'
+              assert text.count(old) == 1
+              domain.write_text(text.replace(old, 'raise ValueError("生成数は1以上の整数で指定してください")'), encoding='utf-8')
+
+              engine = app / 'snaymanager/engine.py'
+              text = engine.read_text(encoding='utf-8')
+              old = ('            if config.count > 2:\n'
+                     '                raise SiteProblem("GUEST_PROBE_LIMIT", "未ログイン方式は未検証です。まず2体までの比較検証に限定します")\n')
+              assert text.count(old) == 1
+              engine.write_text(text.replace(old, ''), encoding='utf-8')
+
+              gui = app / 'snaymanager/gui.py'
+              text = gui.read_text(encoding='utf-8')
+              old = 'self.count_in = ttk.Spinbox(options, from_=1, to=20, width=5, textvariable=self.count)'
+              assert text.count(old) == 1
+              text = text.replace(old, 'self.count_in = ttk.Entry(options, width=7, textvariable=self.count)')
+              text = text.replace('未ログインの通常Chromeを最大2体まで検証（未実証）', '未ログインの通常Chromeで検証（参加可否は環境に依存）')
+              text = text.replace('guest_probeは未ログインで通常PLAYできるか最大2体を検証します（成功未確認）。',
+                                  'guest_probeは未ログインの通常ChromeでPLAYを検証します。生成数の上限は設けていません。')
+              gui.write_text(text, encoding='utf-8')
+
+              init = app / 'snaymanager/__init__.py'
+              text = init.read_text(encoding='utf-8')
+              assert '__version__ = "2.2.5"' in text
+              init.write_text(text.replace('__version__ = "2.2.5"', '__version__ = "2.2.6"'), encoding='utf-8')
+
+              install = app / 'install-version.json'
+              install_meta = json.loads(install.read_text(encoding='utf-8'))
+              assert install_meta['version'] == '2.2.5'
+              install_meta['version'] = '2.2.6'
+              install.write_text(json.dumps(install_meta, ensure_ascii=False) + '\n', encoding='utf-8')
+
+              manifest = app / 'update-manifest.json'
+              manifest_meta = json.loads(manifest.read_text(encoding='utf-8'))
+              assert manifest_meta['version'] == '2.2.5'
+              manifest_meta['version'] = '2.2.6'
+              manifest_meta['description'] = 'Remove arbitrary upper limits on desired player count'
+              manifest.write_text(json.dumps(manifest_meta, ensure_ascii=False) + '\n', encoding='utf-8')
+
+              for path in (domain,engine,gui,init):
+                  py_compile.compile(str(path), doraise=True)
+              sys.path.insert(0, str(app))
+              from snaymanager.domain import Config
+              for count in (1,2,20,21,50,100,500,10000):
+                  Config(count=count).validate()
+              for count in (0,-1,True,1.5):
+                  try:
+                      Config(count=count).validate()
+                  except ValueError:
+                      pass
+                  else:
+                      raise AssertionError(f'invalid count accepted: {count}')
+              assert 'GUEST_PROBE_LIMIT' not in engine.read_text(encoding='utf-8')
+              assert 'to=20' not in gui.read_text(encoding='utf-8')
+              assert 'await nick.fill("")' in (app/'snaymanager/site.py').read_text(encoding='utf-8')
+
+              package = Path('SnayManagerV2-update.zip')
+              with ZipFile(package, 'w', ZIP_DEFLATED) as out:
+                  for file in sorted(app.rglob('*')):
+                      if file.is_file() and '__pycache__' not in file.parts:
+                          out.write(file, file.relative_to(root))
+          with ZipFile('SnayManagerV2-update.zip') as z:
+              assert json.loads(z.read('SnayManagerV2/install-version.json'))['version'] == '2.2.6'
+          package = Path('SnayManagerV2-update.zip')
+          metadata = {
+              'version': '2.2.6',
+              'zip_asset': package.name,
+              'sha256': hashlib.sha256(package.read_bytes()).hexdigest(),
+              'min_launcher': '1.0.0'
+          }
+          Path('SnayManagerV2-update.json').write_text(json.dumps(metadata, indent=2)+'\n', encoding='utf-8')
+          print('Verified uncapped player count, v2.2.6, SHA-256:', metadata['sha256'])
+          PYCODE
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create v2.2.6 SnayManagerV2-update.zip SnayManagerV2-update.json --title 'SnayManager V2 v2.2.6' --notes 'Remove app-imposed caps on player count in the UI, configuration, and guest mode. Does not alter Snay.io server-side limits.' --latest
