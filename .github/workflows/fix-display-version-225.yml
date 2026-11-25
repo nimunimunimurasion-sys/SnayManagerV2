@@ -1,0 +1,74 @@
+name: Fix displayed version 2.2.5
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/fix-display-version-225.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download previous release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p baseline
+          gh release download v2.2.4 --pattern 'SnayManagerV2-update.zip' --dir baseline
+      - name: Fix version display and verify package
+        run: |
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          from zipfile import ZipFile, ZIP_DEFLATED
+          import hashlib, json, py_compile, tempfile
+          base = Path('baseline/SnayManagerV2-update.zip')
+          with tempfile.TemporaryDirectory() as d:
+              root = Path(d)
+              with ZipFile(base) as z:
+                  z.extractall(root)
+              app = root / 'SnayManagerV2'
+              init = app / 'snaymanager/__init__.py'
+              s = init.read_text(encoding='utf-8')
+              assert '__version__ = "2.2.2"' in s
+              init.write_text(s.replace('__version__ = "2.2.2"', '__version__ = "2.2.5"'), encoding='utf-8')
+              version = app / 'install-version.json'
+              meta = json.loads(version.read_text(encoding='utf-8'))
+              assert meta['version'] == '2.2.4'
+              meta['version'] = '2.2.5'
+              version.write_text(json.dumps(meta) + chr(10), encoding='utf-8')
+              manifest = app / 'update-manifest.json'
+              metadata = json.loads(manifest.read_text(encoding='utf-8'))
+              assert metadata['version'] == '2.2.4'
+              metadata['version'] = '2.2.5'
+              metadata['description'] = 'Fix displayed version and keep guest nickname behavior'
+              manifest.write_text(json.dumps(metadata) + chr(10), encoding='utf-8')
+              site = (app / 'snaymanager/site.py').read_text(encoding='utf-8')
+              assert 'await nick.fill("")' in site, 'Guest nickname fix missing'
+              py_compile.compile(str(init), doraise=True)
+              py_compile.compile(str(app / 'snaymanager/site.py'), doraise=True)
+              out = Path('SnayManagerV2-update.zip')
+              with ZipFile(out, 'w', ZIP_DEFLATED) as z:
+                  for file in sorted(app.rglob('*')):
+                      if file.is_file() and '__pycache__' not in file.parts:
+                          z.write(file, file.relative_to(root))
+          digest = hashlib.sha256(out.read_bytes()).hexdigest()
+          update_info = {
+              'version': '2.2.5',
+              'zip_asset': 'SnayManagerV2-update.zip',
+              'sha256': digest,
+              'min_launcher': '1.0.0'
+          }
+          Path('SnayManagerV2-update.json').write_text(json.dumps(update_info, indent=2) + chr(10), encoding='utf-8')
+          with ZipFile(out) as z:
+              assert b'__version__ = "2.2.5"' in z.read('SnayManagerV2/snaymanager/__init__.py')
+              assert json.loads(z.read('SnayManagerV2/install-version.json'))['version'] == '2.2.5'
+          print('Verified version 2.2.5, SHA-256', digest)
+          PYCODE
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create v2.2.5 SnayManagerV2-update.zip SnayManagerV2-update.json --title 'SnayManager V2 v2.2.5' --notes 'Fix wrong 2.2.2 version displayed by earlier updates. Guest nickname fix retained.' --latest
