@@ -1,6 +1,6 @@
 {
-  "version": "2.2.2",
+  "version": "2.2.3",
   "zip_asset": "SnayManagerV2-update.zip",
-  "sha256": "48f316472e34e35529d8db6c0cdf1c9d25e6d1f8cc8527a2d25d7dd7140e0e50",
+  "sha256": "b1a4b66949d3345f96847f55b4ff0fa8fcc263521878c38dfecad15bcb849aa6",
   "min_launcher": "1.0.0"
 }
