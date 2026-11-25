@@ -1,0 +1,90 @@
+name: Preserve main account from bot sessions v2.2.7
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/main-safe-227.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch release v2.2.6
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p baseline
+          gh release download v2.2.6 --pattern 'SnayManagerV2-update.zip' --dir baseline
+      - name: Patch and validate
+        run: |
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          from zipfile import ZipFile,ZIP_DEFLATED
+          import tempfile,json,hashlib,sys,py_compile
+          def patch(path,old,new):
+              text=path.read_text(encoding='utf-8')
+              assert text.count(old)==1, (str(path),text.count(old),old[:70])
+              path.write_text(text.replace(old,new),encoding='utf-8')
+          with tempfile.TemporaryDirectory() as tmp:
+              root=Path(tmp)
+              with ZipFile('baseline/SnayManagerV2-update.zip') as z:
+                  z.extractall(root)
+              app=root/'SnayManagerV2'
+              d=app/'snaymanager/domain.py'
+              patch(d,'    connection_mode: str = "accounts"  # accounts | guest_probe (ordinary public UI only)\n',
+                    '    connection_mode: str = "accounts"  # accounts | guest_probe (ordinary public UI only)\n    reserved_account: str = ""  # reserved regular player identity\n')
+              patch(d,'        if self.connection_mode not in {"accounts", "guest_probe"}:\n',
+                    '        if not isinstance(self.reserved_account, str) or (self.reserved_account and not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", self.reserved_account)):\n            raise ValueError("メイン用アカウント名は英数字・_・- の40文字以内で指定してください")\n        if self.connection_mode not in {"accounts", "guest_probe"}:\n')
+              engine=app/'snaymanager/engine.py'
+              patch(engine,'            accounts = self.available_accounts()\n            if config.count > len(accounts):\n',
+                    '            accounts = [name for name in self.available_accounts() if name != config.reserved_account]\n            if config.count > len(accounts):\n')
+              patch(engine,'f"登録済みアカウントは{len(accounts)}個です。{config.count}体には別々のアカウントが{config.count}個必要です"',
+                    'f"BOT用アカウント数は{len(accounts)}個です。{config.count}体には別々のBOT用アカウントが必要です"')
+              g=app/'snaymanager/gui.py'
+              patch(g,'        self.connection_mode = tk.StringVar(value=self.config.connection_mode)\n',
+                    '        self.connection_mode = tk.StringVar(value=self.config.connection_mode)\n        self.reserved_account = tk.StringVar(value=self.config.reserved_account or "main")\n')
+              patch(g,'        self.allowed = tk.BooleanVar(value=False)\n',
+                    '        ttk.Label(options, text="メイン用（BOTから除外）").grid(row=4, column=0, columnspan=3, sticky="w", pady=(5,0))\n        ttk.Entry(options, width=15, textvariable=self.reserved_account).grid(row=4, column=3, columnspan=2, sticky="w", pady=(5,0))\n        self.allowed = tk.BooleanVar(value=False)\n')
+              patch(g,'            connection_mode=self.connection_mode.get(),\n',
+                    '            connection_mode=self.connection_mode.get(), reserved_account=self.reserved_account.get().strip(),\n')
+              patch(g,'                text += "※ゲストPLAYが利用可能か未確認。ログイン必須なら自動停止します。\\n\\n"',
+                    '                text += "※ゲスト接続は同じネットワークのメインを切断した実績があります。メイン保護には accounts を使用してください。\\n\\n"')
+              i=app/'snaymanager/__init__.py'
+              text=i.read_text(encoding='utf-8')
+              assert '__version__ = "2.2.6"' in text
+              i.write_text(text.replace('__version__ = "2.2.6"','__version__ = "2.2.7"'),encoding='utf-8')
+              for name in ('install-version.json','update-manifest.json'):
+                  p=app/name
+                  m=json.loads(p.read_text(encoding='utf-8'))
+                  assert m['version']=='2.2.6'
+                  m['version']='2.2.7'
+                  p.write_text(json.dumps(m,ensure_ascii=False)+'\n',encoding='utf-8')
+              for p in app.rglob('*.py'):
+                  if '__pycache__' not in p.parts:
+                      py_compile.compile(str(p),doraise=True)
+              sys.path.insert(0,str(app))
+              from snaymanager.domain import Config
+              for count in (1,2,20,50,500):
+                  Config(count=count, reserved_account='main').validate()
+              c=Config(reserved_account='main',count=1)
+              assert Config.from_dict(c.to_dict()).reserved_account=='main'
+              assert Config(count=50).count==50
+              assert 'name != config.reserved_account' in engine.read_text(encoding='utf-8')
+              assert 'self.reserved_account.get().strip()' in g.read_text(encoding='utf-8')
+              assert 'await nick.fill("")' in (app/'snaymanager/site.py').read_text(encoding='utf-8')
+              with ZipFile('SnayManagerV2-update.zip','w',ZIP_DEFLATED) as z:
+                  for p in sorted(app.rglob('*')):
+                      if p.is_file() and '__pycache__' not in p.parts:
+                          z.write(p,p.relative_to(root))
+          z=Path('SnayManagerV2-update.zip')
+          meta={'version':'2.2.7','zip_asset':z.name,'sha256':hashlib.sha256(z.read_bytes()).hexdigest(),'min_launcher':'1.0.0'}
+          Path('SnayManagerV2-update.json').write_text(json.dumps(meta,indent=2)+'\n',encoding='utf-8')
+          print('Verified v2.2.7 / hash',meta['sha256'])
+          PYCODE
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create v2.2.7 SnayManagerV2-update.zip SnayManagerV2-update.json --title 'SnayManager V2 v2.2.7' --notes 'Exclude the designated main account from authenticated BOT launches, preventing duplicate-account session takeover. Does not bypass guest/network slot limits.' --latest
